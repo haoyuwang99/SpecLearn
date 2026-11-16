@@ -1,0 +1,91 @@
+%% ---------------------------------------------------------------------------
+%% SpecMender: L*-based agent safety contract synthesis
+%%
+%% OOPSLA / PACMPL submission format (ACM acmart, acmsmall).
+%% Requires acmart.cls (TeX Live: `texlive-publishers`; available by default on
+%% Overleaf via the ACM Proceedings template). Build with:
+%%     latexmk -pdf main.tex
+%%
+%% Options in use:
+%%   acmsmall  - the single-column journal layout PACMPL/OOPSLA requires
+%%   review    - line numbers, for reviewer reference
+%%   anonymous - suppresses the author block for double-blind submission
+%%   screen    - colored hyperlinks; drop for print
+%% For a non-anonymous draft or camera-ready, delete `anonymous` (and `review`).
+%% ---------------------------------------------------------------------------
+\documentclass[sigconf,review,anonymous]{acmart}
+\setcopyright{none}
+\settopmatter{printacmref=false}
+\acmConference[Draft]{Research draft}{2026}{}
+\acmYear{2026}
+
+%% --- Journal metadata -----------------------------------------------------
+%% Replace volume/number/article/DOI with the values supplied on acceptance.
+% \acmJournal{PACMPL}
+% \acmVolume{1}
+% \acmNumber{OOPSLA}
+% \acmArticle{1}
+% \acmYear{2026}
+% \acmMonth{1}
+% \setcopyright{none}          % submission; switch to acmlicensed later
+% \acmDOI{}
+
+%% PACMPL house citation style.
+% \citestyle{acmauthoryear}
+
+%% --- Packages -------------------------------------------------------------
+%% acmart already provides amsmath, amssymb, booktabs, hyperref and microtype;
+%% the first three are re-requested without options, which is a no-op if they
+%% are loaded and keeps the sources compilable against older acmart releases.
+%% Do NOT add geometry, hyperref, natbib or titlesec: acmart configures them
+%% and loading them again breaks the layout or the reference format.
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{float} % Keep the worked observation table next to its explanation
+\usepackage{xspace}
+
+\input{macros}
+
+%% Emergency stretch avoids overfull lines around formulas and unhyphenatable names in two columns.
+\setlength{\emergencystretch}{1.5em}
+
+\begin{document}
+
+%% --- Front matter ---------------------------------------------------------
+\title{Policy-Guided Active Learning of Safety Contracts for LLM Agents}
+
+\author{Haoyu Wang}
+\affiliation{%
+  \institution{TODO: institution}
+  \city{TODO: city}
+  \country{TODO: country}
+}
+\email{tjuwhyse@gmail.com}
+\begin{abstract}
+Safety contracts constrain LLM agents' consequential actions independently of the agents' own decisions. However, correct enforcement does not guarantee safety when manually specified contracts omit policy-relevant conditions. For example, checking recipient authorization may fail to prevent a confidential report from being exposed through a public link, while prohibiting all public links unnecessarily restricts legitimate sharing. We study the problem of automatically learning an enforceable safety contract from three inputs: a target agent $A$, a dataset of agent trajectories with ground-truth safety labels, and a natural-language policy $P$ that summarizes this experience. The contract should reproduce the ground-truth judgment, not the policy's wording. We propose \system{}, an active learning framework that models policy-compliant execution prefixes as a regular, prefix-closed language over a fixed, policy-relevant event alphabet. Building on Angluin's $L^*$ algorithm, \system{} learns a deterministic finite automaton (DFA) with two teachers. Membership queries, whether an event sequence is safe, are answered by the dataset's labels where they apply and otherwise by an LLM that reads the policy, so the policy generalizes the experience to behavior the data does not show. Equivalence queries are answered by replaying the labeled trajectories, so every correction is backed by real feedback from the world; an LLM never judges equivalence, which would be circular. The learned DFA is then compiled into an AgentSpec contract, where event mappings provide triggers, DFA transitions implement stateful checks, and runtime mediation prevents unsafe effects before commitment. The number of counterexamples is bounded by the dataset even when the LLM errs. If the labels are correct and the LLM is correct where they are silent, the learned DFA agrees with every labeled trajectory and is never larger than the target's minimal DFA; with a sufficiently rich dataset, it is exact. We evaluate \system{} on four instrumented agent domains in terms of contract safety and utility, counterexample discovery efficiency, oracle cost, and runtime enforcement fidelity. Contracts learned with exact oracles are exact and prevent every violation on held-out tasks. LLM membership judges fall short of exactness: a single wrong answer can keep $L^*$ from converging, and a reasoning judge yields one exact and one near-exact contract out of four.
+\end{abstract}
+\keywords{LLM agents, safety contracts, active automata learning, runtime enforcement}
+\ccsdesc[500]{Security and privacy~Software security engineering}
+\maketitle
+
+\input{sections/introduction}
+\input{sections/motivating-example}
+
+
+% {\textbf{Proposal stops here.}}
+
+
+\input{sections/problem-formulation}
+\input{sections/method}
+\input{sections/evaluation}
+\input{sections/related-work}
+\input{sections/limitations}
+\input{sections/conclusion}
+
+%% --- References -----------------------------------------------------------
+%% ACM bibliography style.
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

@@ -1,0 +1,21 @@
+%% ---------------------------------------------------------------------------
+%% Shared macros. Kept separate from main.tex so that section files can be
+%% compiled in isolation against the same definitions.
+%% ---------------------------------------------------------------------------
+
+\newcommand{\system}{\textsc{SpecLearn}\xspace}
+\newcommand{\systemR}{\textsc{SpecLearn}-R\xspace}  % same configuration with the judge's reasoning mode on
+\newcommand{\op}[1]{\textsc{#1}}
+
+%% Evaluation: domain names (artifact identifiers doc_share, payments, devops, data_export) and answer boxes.
+\newcommand{\dom}[1]{\mbox{\textsf{#1}}}
+\newcommand{\answerbox}[2]{\smallskip\noindent\fbox{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{\small\textbf{Answer to #1.} #2}}\smallskip}
+
+%% Recurring notation of the coverage analysis (Section 3).
+\newcommand{\Sites}{\operatorname{Sites}}
+\newcommand{\Attr}{\operatorname{Attr}}
+\newcommand{\Reach}{\operatorname{Reach}}
+\newcommand{\Trig}{\operatorname{Trig}}
+\newcommand{\Cons}{\operatorname{Cons}}
+\newcommand{\Covered}{\operatorname{Covered}}
+\newcommand{\Obligations}{\operatorname{Obligations}}

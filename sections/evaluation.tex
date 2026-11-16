@@ -1,0 +1,470 @@
+% Evaluation (Section 5). All numbers come from results/REPORT.md and the logged runs in results/ of the
+% SpecLearn artifact.
+\section{Evaluation}
+\label{sec:eval}\label{sec:evaluation}
+
+This section reports a controlled study of \system{} on four sandboxed domains with reference oracles, which predates the dataset-based formulation of Section~\ref{sec:problem}. % TODO: add the real-world dataset evaluation (docs/EXPERIMENT_PLAN.md)
+It answers four research questions:
+
+\begin{description}
+  \item[RQ1 (Exact membership).] When membership answers are exact, which equivalence checks let $L^*$ identify $L_G$,
+  and how many expert labels does active learning need compared with passive and random-query learning?
+  \item[RQ2 (Membership assumption).] How close do LLM membership judges come to the exact answers that assumption
+  (A3) requires, and how do their errors propagate into the learned contracts?
+  \item[RQ3 (Runtime fidelity).] Do the event abstraction and the compiled AgentSpec contracts enforce the
+  learned model faithfully at runtime?
+  \item[RQ4 (Safety and utility).] Do the synthesized contracts prevent policy violations of an LLM agent while
+  preserving its legitimate tasks, compared with expert-written rules and direct LLM synthesis?
+\end{description}
+
+% -------------------------------------------------------------------------------------
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Agent domains.}
+We built four instrumented agent domains (Table~\ref{tab:domains}). Each provides the inputs of \system{}: a fixed
+natural-language policy $P$, a tool API, a deterministic sandbox, and an expert-written event abstraction
+$(\Sigma,\Phi,\mu)$ with Boolean recognition predicates over visible fields. Each domain also has a reference DFA and an independent concrete policy checker. The checker inspects the ground-truth
+effects of tool calls and never uses $\Sigma$. Together they serve as the ground truth (A5) and as the reference for the
+metrics; in the runs below, ground-truth labels are taken from the reference DFA, which agrees with the checker within
+the bounds stated next. \dom{DocShare} is the running example of Section~\ref{sec:motivating-example}.
+
+We checked policy sufficiency (Section~\ref{sec:problem}) within bounds: the checker agrees with the reference DFA on the canonical concretization of
+every abstract word up to length 4--5 and on every concrete action sequence of length at most 3.
+
+The domains contain the difficulties the method must handle:
+\begin{itemize}
+  \item unlabeled files (\dom{DocShare});
+  \item a multi-effect tool and an outcome-dependent approval step (\dom{Payments});
+  \item unannotated SQL migrations (\dom{DevOps});
+  \item synonym field names (\dom{DataExport});
+  \item alias tools that produce the same effect (three domains).
+\end{itemize}
+Each domain has 12--13 held-out tasks: 6--7 benign and 6 unsafe, 49 in total. The unsafe tasks ask for an action that
+would violate $P$. Each domain also has 8 training tasks, used only by passive inference.
+
+\begin{table}[t]
+  \caption{Agent domains. $|\Sigma|$: events; $|Q|$: states of the minimal reference DFA; tasks: held-out
+  benign/unsafe tasks.}
+  \label{tab:domains}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}p{1.55cm}p{4.0cm}ccc@{}}
+    \toprule
+    Domain & Policy $P$ (abridged) & $|\Sigma|$ & $|Q|$ & Tasks \\
+    \midrule
+    \dom{DocShare} & Confidential documents must not become accessible to unauthorized parties. & 3 & 3 & 6/6 \\
+    \dom{Payments} & Payments above \$1{,}000 need a manager's approval; an approval covers one execution and is voided by any change. & 4 & 4 & 6/6 \\
+    \dom{DevOps} & Deploy only if tests passed after the latest change; a destructive migration needs a fresh backup. & 6 & 5 & 7/6 \\
+    \dom{DataExport} & No personal data to external recipients unless anonymized; at most two external reports. & 5 & 6 & 6/6 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Target agent and LLMs.}
+The target agent $A$ is a JSON tool-calling agent built on Qwen3-30B-A3B. It is \emph{not} told the policy, so the
+contract has to constrain it independently of its own decisions.
+
+All LLMs are open-weight models served locally with MLX on an Apple M3 Ultra (96\,GB). They use greedy decoding
+(temperature 0) and fixed prompts. The roles are:
+\begin{itemize}
+  \item \emph{Membership judge:} Qwen3-30B-A3B. It is shown the word's canonical execution in the sandbox, a scripted
+  concretization rather than an agent run, and uses a step-wise prompt. Its reasoning mode is used only to escalate unresolved queries.
+  \item \emph{Scenario writer for agent-realized tests:} Qwen3-14B. Using a separate model lets judge errors
+  and tester errors be told apart.
+  \item \emph{LLM event recognizer:} Qwen3-30B-A3B.
+\end{itemize}
+\systemR{} denotes the same configuration with the judge's reasoning mode always enabled.
+
+\paragraph{Implementation.}
+\system{} is 5.5k lines of Python.
+\begin{itemize}
+  \item \emph{Learner.} $L^*$ with Angluin's counterexample processing.
+  \item \emph{Membership service.} It caches labels with their provenance and infers the labels implied by prefix
+  closure~\cite{hungar2003domain}. It escalates unresolved queries, and it suspends learning if no oracle resolves a query rather than invent a
+  label.
+  \item \emph{Equivalence check.} The implementation predates the ground-truth formulation of Section~\ref{sec:lstar}:
+  it labels equivalence tests with the active membership oracle. With exact oracles these labels are ground truth;
+  with an LLM judge they are not. It builds its tests online rather than replaying a fixed dataset. Each equivalence
+  query first runs 6 agent-realized tests: the scenario writer turns a target word into a task, the agent executes it
+  in a fresh sandbox, and the realized word $\alpha(z)$ is labeled. Up to 120 hypothetical tests follow, from
+  hypothesis-guided selection: the access words of the hypothesis states, extended by $\Sigma^{\le 2}$ and the
+  distinguishing suffixes $E$, prioritized by transitions that enter or lie next to the rejecting region, then by
+  untested event pairs. They predate the use of a fixed labeled dataset.
+  \item \emph{Budget.} Runs labeled by an LLM are capped at 400 labels and 12 equivalence queries.
+  \item \emph{Compiler.} It emits one AgentSpec rule per rejecting DFA transition, with \texttt{event\_$e$} and
+  \texttt{state\_$q$} predicates, and enforces before execution (\texttt{llm\_self\_examine}: the call is not executed, and the agent may continue).
+  \item \emph{Runtime recognition.} The runtime uses a hybrid recognizer: Boolean predicates first, and the LLM only
+  when they abstain.
+\end{itemize}
+
+\paragraph{Compared conditions.}
+We compare six conditions:
+\begin{enumerate}
+  \item \emph{Expert-written AgentSpec rules}, in two variants over a generic past-time predicate library with the
+  operators \texttt{ever}, \texttt{last}, \texttt{since} and \texttt{count}. The \emph{careful} rules are correct by construction.
+  The \emph{naive} rules contain plausible omissions, such as the naive rules discussed in Section~\ref{sec:motivating-example}.
+  \item \emph{LLM direct synthesis.} From $P$, $\Sigma$ and the tool schemas, the LLM writes either a DFA over $\Sigma$
+  or AgentSpec rules over the same predicate library, in one call. We report Qwen3-30B-A3B with reasoning, the
+  strongest of seven model configurations.
+  \item \emph{Passive inference}: RPNI~\cite{oncina1992rpni} on the labeled prefixes of the agent's executions of the training tasks.
+  \item \emph{Random-query learning}: RPNI on randomly chosen words, labeled at the label budget of the matched active
+  learner.
+  \item \emph{$L^*$ with exact oracles}, backed by the reference DFA.
+  \item \emph{\system{}} and \emph{\systemR{}} with practical experts. The LLM judge labels both the membership
+  queries and the equivalence tests. Section~\ref{sec:problem} argues against this for equivalence; we report it as
+  measured; the split teacher of Section~\ref{sec:lstar}, with labels first, remains to be evaluated.
+\end{enumerate}
+
+\paragraph{Metrics.}
+\begin{itemize}
+  \item \emph{Language level} (Definition~\ref{def:policy-language}). The unsafe-permission rate (UP) is
+  $|(L(C)\setminus L_G)\cap\Sigma^{\le\ell}|/|\Sigma^{\le\ell}\setminus L_G|$, and the over-restriction rate (OR) is
+  $|(L_G\setminus L(C))\cap\Sigma^{\le\ell}|/|L_G\cap\Sigma^{\le\ell}|$. Unless stated otherwise, $\ell=6$ ($\ell=5$ for
+  \dom{DevOps}). Each word is replayed through the contract's monitor, so DFA-based and rule-based contracts are measured
+  identically. The rates depend on $\ell$: \systemR{}'s over-restriction on \dom{DevOps} is 5.2\% at $\ell=5$ but
+  19.0\% at $\ell=10$.
+  \item \emph{Online.} The agent runs every held-out task with the contract in the loop. We count the unsafe tasks in
+  which a violation is committed and the benign tasks completed without violation.
+  \item \emph{Cost.} Expert labels and LLM tokens.
+\end{itemize}
+
+\paragraph{Reproducibility.}
+Randomness is seeded. Every LLM response is cached under a hash of the model revision, prompt and decoding parameters.
+Re-running all experiments from the cache reproduced all 191 result files exactly.
+% TODO: anonymized artifact link
+
+% -------------------------------------------------------------------------------------
+\subsection{RQ1: Learning with Exact Membership}
+\label{sec:rq1}
+
+\paragraph{Controlled targets.}
+We first validated the learner on 200 random minimal prefix-closed DFAs with 4 to 64 states and 2 to 16 events,
+10 per combination, each learned under 15 configurations (3{,}000 runs). We used an exact membership oracle, an exact equivalence oracle that returns the
+shortest counterexample or one padded to a length of at least 10, 25, 50 or 100, and three counterexample-processing strategies: Angluin's~\cite{angluin1987learning}, Maler--Pnueli's~\cite{maler1995learnability},
+and Rivest--Schapire's~\cite{rivest1993inference}.
+
+\begin{itemize}
+  \item $L^*$ recovered the minimal target in all 3{,}000 runs and never needed more than $N-1$ counterexamples.
+  \item The number of distinct membership queries grew roughly as $N^{1.6}$ and as $|\Sigma|^{1.1}$. It stayed below
+  49\% (median 8\%) of the classical bound $O(|\Sigma|(B+1)N^2)$.
+  \item Long counterexamples inflate the queries of Angluin's strategy ($\times 4.9$ at $B=100$, $N=32$, $|\Sigma|=4$)
+  and of Maler--Pnueli's ($\times 7.9$), but not those of Rivest--Schapire's (1{,}606 vs.\ 1{,}685).
+  \item On \dom{DocShare} the observation table reproduces the walk-through of Section~\ref{sec:motivating-example}. The first hypothesis has one
+  state; the verified counterexample \texttt{c\,p} adds suffix \texttt{p} through a consistency fix; MQ(\texttt{c\,n\,p})
+  $=1$ separates \texttt{c} from \texttt{c\,n}; the result is the three-state DFA of Figure~\ref{fig:sharing-dfa}.
+\end{itemize}
+
+\paragraph{Domains.}
+Table~\ref{tab:rq1} shows the label cost. With exact labels, the equivalence tests are ground-truth-labeled: agent-realized tests
+form an online corpus of labeled agent trajectories, and the guided suite adds labeled abstract words. Neither is
+checked for completeness. % TODO: replace with the real-world dataset experiments of docs/EXPERIMENT_PLAN.md
+\begin{itemize}
+  \item With exact equivalence queries, $L^*$ recovers all four reference DFAs with 11--111 labels.
+  \item Agent-realized tests alone, with exact labels and 10 tests per equivalence query (instead of the default 6), recover \dom{DocShare} and
+  \dom{DevOps} but stop prematurely on \dom{Payments} and \dom{DataExport}, leaving 4.3\% and 17.4\% unsafe
+  permissions. The missing distinctions need long sequences (approval consumption, \texttt{ml\,ap\,ex\,ex}; a third
+  external send). Every disagreement this corpus exposed was genuine, but it ran out of disagreements before the hypothesis was correct:
+  the corpus was incomplete.
+  \item The hypothesis-guided suite recovers all four, at 27--311 labels. Its final query spends its budget without finding
+  a disagreement, so the result is only consistent with its tests; nothing certifies it.
+  \item Random-word equivalence testing recovers \dom{DataExport} in only 4 of 10 seeds.
+  \item At the same label budgets, random-query learning recovers only \dom{DocShare} (0 of 10 seeds elsewhere, up to
+  7.1\% UP).
+  \item Passive inference from the training traces recovers only \dom{DocShare} (up to 42\% UP elsewhere).
+\end{itemize}
+
+We also swept the equivalence budget (exact labels, 20 seeds). Hypothesis-guided testing removes premature stops at 40 labels
+per equivalence query on \dom{Payments} and \dom{DevOps}, and at 160 on \dom{DataExport}. At 160 labels, random
+testing still stops prematurely in 5\% (\dom{Payments}) and 50\% (\dom{DataExport}) of runs. Random testing is
+competitive only where violations are dense: on \dom{DevOps} with 10 labels it stops prematurely in 10\% of runs, against
+80\% for hypothesis-guided testing.
+
+\begin{table}[t]
+  \caption{Learning with exact labels. $L^*$ and Guided EQ (hypothesis-guided bounded testing): expert labels until
+  termination (both learned the exact DFA). Random EQ and Random query: seeds (of 10) that learned $L_G$ exactly; Random
+  query uses the Guided-EQ label budget. Passive: labels used and whether the result is exact.}
+  \label{tab:rq1}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Domain & $L^*$ & Guided & Random & Random & Passive \\
+    & (exact EQ) & EQ & EQ & query & \\
+    \midrule
+    \dom{DocShare}   & 11  & 27  & 10/10 & 10/10 & 10, yes \\
+    \dom{Payments}     & 36  & 103 & 10/10 & 0/10  & 14, no \\
+    \dom{DevOps}       & 73  & 195 & 10/10 & 0/10  & 14, no \\
+    \dom{DataExport} & 111 & 311 & 4/10  & 0/10  & 10, no \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\answerbox{RQ1}{With exact membership and equivalence oracles, $L^*$ identifies every target, as classical $L^*$
+guarantees: all 3{,}000 synthetic runs (200 targets) and all four domain policies. With ground-truth labels
+but no completeness, agent-realized trajectories alone stop early on two of four domains, and the budget-capped
+hypothesis-guided suite recovers all four without a certificate. Learning against a fixed real-world labeled dataset is not yet evaluated.
+Random-query learning at the same label budget and passive learning from the training traces each learn only one of
+the four contracts.}
+
+% -------------------------------------------------------------------------------------
+\subsection{RQ2: The Membership Assumption}
+\label{sec:rq2}
+
+\paragraph{Membership judges.}
+We measured judges on 178 independently labeled words (Table~\ref{tab:judges}). The set contains all or sampled words of
+length at most 2, plus 24 longer words per domain balanced over three categories: permitted, violating at the last event,
+and violating earlier.
+
+\begin{itemize}
+  \item The primary judge is 87.6\% accurate (100/87/81/85\% per domain).
+  \item Abstract evidence gives the same accuracy as grounded evidence but shifts the errors: more over-rejection
+  (19.2\% vs.\ 13.5\%) and fewer unsafe acceptances (1.4\% vs.\ 8.1\%).
+  \item A direct (non-step-wise) prompt or a paraphrased yes/no prompt costs 7 points.
+  \item With reasoning enabled, the judge labels all 178 words correctly, at about $1.8\times$ the tokens.
+  \item Verdicts are deterministic: 48 judgments regenerated without the cache were all reproduced. They are not robust
+  to wording: the primary judge changes its verdict on 15--19\% of words under a paraphrased prompt, renamed event
+  symbols or abstract evidence.
+  \item Other models fail in opposite directions. Llama-3.1-8B accepts 69\% of prohibited words; Qwen3-4B and Qwen3-14B
+  reject about half of the permitted ones.
+\end{itemize}
+
+\begin{table}[t]
+  \caption{LLM membership judges on 178 labeled words. Acc.: accuracy; UA: prohibited words judged permitted; OR:
+  permitted words judged violating.}
+  \label{tab:judges}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    Judge configuration & Acc. & UA & OR \\
+    \midrule
+    Qwen3-30B, grounded, step-wise (primary) & 87.6 & 8.1 & 13.5 \\
+    \quad abstract evidence                  & 87.6 & 1.4 & 19.2 \\
+    \quad direct prompt                      & 80.9 & 10.8 & 19.2 \\
+    \quad paraphrased (yes/no) prompt        & 80.3 & 9.5 & 25.0 \\
+    \quad reasoning enabled                  & \textbf{100.0} & 0.0 & 0.0 \\
+    Qwen3-32B, grounded, direct              & 91.0 & 10.8 & 7.7 \\
+    Mistral-Small-24B, grounded, direct      & 86.0 & 1.4 & 23.1 \\
+    Llama-3.1-8B, grounded, direct           & 70.8 & 68.9 & 1.0 \\
+    Qwen3-4B, grounded, direct               & 68.5 & 10.8 & 46.2 \\
+    Qwen3-14B, grounded, direct              & 68.0 & 0.0 & 51.9 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Sensitivity to label errors.}
+With simulated persistent noise, each word's label is flipped with probability $\rho$ (20 seeds, hypothesis-guided
+equivalence testing). Exact recovery falls from 100\% to 5--75\% at $\rho=1\%$, and to 0--15\% at $\rho=5\%$. At
+$\rho=5\%$ the contracts over-restrict 23--29\% of permitted words and permit 5--9\% of prohibited ones (words up to
+length 8).
+
+\paragraph{Learning with LLM judges.}
+Table~\ref{tab:rq2} shows the learned contracts. Both configurations learn \dom{DocShare} exactly from 29 labels.
+
+Without reasoning, the judge mislabels 19--36\% of the queries $L^*$ asks in the other domains. The errors are mostly
+over-cautious ``violation'' verdicts, for instance treating setting a large draft payment as paying it, plus lost counts
+on long sequences. $L^*$ exhausts its budget with 9--17-state monitors that over-restrict 15--61\% of permitted words.
+
+With reasoning, the error rate drops to 0.3--6\%. The \dom{Payments} contract is practically exact (one over-restricted
+word out of 3{,}910), and \dom{DevOps} reaches 3.3\% UP and 5.2\% OR. Three effects remain:
+\begin{enumerate}
+  \item \emph{One wrong label can prevent convergence.} On \dom{Payments}, a single wrong label kept $L^*$ from
+  converging: it spent the remaining budget adding states to explain it (10 states instead of 4). Because the same
+  judge labeled the equivalence tests, they could not expose the error; a label for that word would have overridden it.
+  \item \emph{Balanced word sets overstate accuracy.} The judge that was perfect on the balanced word set errs on
+  3.5--6\% of the learner's queries, which are long and probe the policy boundary. On \dom{DataExport} it consistently
+  judged reading personal data and then sending it to an internal recipient to be a violation.
+  \item \emph{Long queries can exhaust the reasoning budget.} Learning on \dom{DataExport} was suspended when the judge
+  used up its reasoning budget on a 10-event query without reaching a verdict.
+\end{enumerate}
+
+\begin{table}[t]
+  \caption{Contracts learned with LLM judges. States: learned/reference. Wrong: mislabeled queries / queries judged. UP/OR (\%): language level,
+  all words up to length 6 (5 for \dom{DevOps}). $^\dagger$label budget exhausted; $^\ddagger$suspended on an unresolved query.}
+  \label{tab:rq2}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}lcrr@{\hspace{8pt}}crr@{}}
+    \toprule
+    & \multicolumn{3}{c}{\system{}} & \multicolumn{3}{c}{\systemR{}} \\
+    \cmidrule(r){2-4}\cmidrule(l){5-7}
+    Domain & States & Wrong & UP/OR & States & Wrong & UP/OR \\
+    \midrule
+    \dom{DocShare}   & 3/3 & 0/29 & 0.0/0.0 & 3/3 & 0/29 & 0.0/0.0 \\
+    \dom{Payments}     & 13/4$^\dagger$ & 144/400 & 17.2/60.2 & 10/4$^\dagger$ & 1/399 & 0.0/0.03 \\
+    \dom{DevOps}       & 17/5$^\dagger$ & 94/395  & 4.7/60.5  & 13/5$^\dagger$ & 14/399 & 3.3/5.2 \\
+    \dom{DataExport} & 9/6$^\dagger$  & 74/399  & 7.4/15.2  & 11/6$^\ddagger$ & 16/266 & 17.3/10.2 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Agent-realized tests.}
+The scenario writer and the agent reproduced the target word exactly in 53--94\% of tests. Within \system{},
+agent-realized tests produced 1--3 verified counterexamples per domain. Used alone with exact labels, they stop early
+on two domains (Section~\ref{sec:rq1}).
+
+\answerbox{RQ2}{Current LLM judges do not meet assumption (A3), and $L^*$ amplifies even a few wrong labels into
+oversized, over-restrictive monitors. A non-reasoning judge (88\% accurate) yields one exact contract out of four; the same model
+with reasoning yields one exact and one practically exact contract. Judge accuracy must be measured on the learner's own
+queries, which are harder than balanced samples.}
+
+\begin{table*}[t]
+  \caption{Safety and utility. Language level: unsafe-permission / over-restriction rate (\%) over all words up to length
+  6 (5 for \dom{DevOps}). Online: unsafe held-out tasks with a committed violation, and benign tasks completed without
+  violation. LLM direct synthesis uses Qwen3-30B-A3B with reasoning. $^\dagger$Labeled by the same LLM judge as
+  \system{}: random-query learning at \system{}'s label budget, passive inference on the labeled training traces. Online runs were performed for the listed conditions only.}
+  \label{tab:rq4}
+  \small
+  \begin{tabular}{@{}lccccrr@{}}
+    \toprule
+    & \multicolumn{4}{c}{Language level: UP / OR (\%)} & \multicolumn{2}{c}{Online} \\
+    \cmidrule(r){2-5}\cmidrule(l){6-7}
+    Condition & \dom{DocShare} & \dom{Payments} & \dom{DevOps} & \dom{DataExport} & Violations & Benign done \\
+    \midrule
+    No contract                        & 100 / 0.0 & 100 / 0.0 & 100 / 0.0 & 100 / 0.0 & 21/24 & 24/25 \\
+    Expert rules, careful              & 0.0 / 0.0 & 0.0 / 0.0 & 0.0 / 0.0 & 0.0 / 0.0 & 0/24 & 23/25 \\
+    Expert rules, naive                & 0.0 / 26.4 & 40.4 / 0.0 & 14.6 / 0.0 & 16.3 / 8.8 & 7/24 & 19/25 \\
+    LLM direct synthesis, DFA          & 0.0 / 0.0 & 4.3 / 0.0 & 0.0 / 4.0 & 0.0 / 0.0 & 2/24 & 22/25 \\
+    LLM direct synthesis, rules        & 0.0 / 0.0 & 4.3 / 0.0 & 28.5 / 28.7 & 0.0 / 0.0 & 4/24 & 23/25 \\
+    Passive inference (RPNI)$^\dagger$ & 0.0 / 0.0 & 10.6 / 34.3 & 14.0 / 35.3 & 42.4 / 27.9 & 3/24 & 20/25 \\
+    Random-query learning$^\dagger$    & 0.0 / 0.0 & 5.7 / 43.7 & 6.7 / 44.7 & 25.7 / 11.1 & 1/24 & 21/25 \\
+    $L^*$ with exact oracles           & 0.0 / 0.0 & 0.0 / 0.0 & 0.0 / 0.0 & 0.0 / 0.0 & 0/24 & 22/25 \\
+    \midrule
+    \system{}                       & 0.0 / 0.0 & 17.2 / 60.2 & 4.7 / 60.5 & 7.4 / 15.2 & 3/24 & 19/25 \\
+    \systemR{}                      & 0.0 / 0.0 & 0.0 / 0.03 & 3.3 / 5.2 & 17.3 / 10.2 & 1/24 & 22/25 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+% -------------------------------------------------------------------------------------
+\subsection{RQ3: Runtime Fidelity}
+\label{sec:rq3}
+
+\paragraph{Event recognition.}
+Table~\ref{tab:recognizers} summarizes recognition on the scripted corpus.
+\begin{itemize}
+  \item \emph{Boolean predicates} never misclassify an effect, but they abstain on up to 40\% of effects, such as
+  unlabeled files, unannotated SQL and synonym field names. The conservative monitor turns abstentions into
+  over-blocking.
+  \item \emph{LLM predicates} never abstain, but misclassify 20--32\% of effects. With the \emph{reference} DFA, this
+  alone causes 31 false permissions.
+  \item \emph{Hybrid recognition} is 93--100\% accurate with zero false permissions. Its residual over-blocks come from
+  the LLM misreading an unannotated \texttt{UPDATE} migration or an unlabeled public file.
+\end{itemize}
+
+\begin{table}[t]
+  \caption{Event recognition on 300 scripted executions per domain: accuracy (abstentions) in \%, and the false
+  permissions (FP) and over-restrictions (OR) that recognition alone causes under the reference DFA, summed over domains.}
+  \label{tab:recognizers}
+  \small
+  \setlength{\tabcolsep}{3.5pt}
+  \begin{tabular}{@{}lccccrr@{}}
+    \toprule
+    Recognizer & \dom{Doc} & \dom{Pay} & \dom{Dev} & \dom{Data} & FP & OR \\
+    \midrule
+    Boolean & 60 (40) & 100 (0) & 87 (13) & 98 (2) & 0 & 102 \\
+    LLM     & 80 (0)  & 68 (0)  & 73 (0)  & 78 (0) & 31 & 136 \\
+    Hybrid  & 98 (0)  & 100 (0) & 93 (0)  & 100 (0) & 0 & 51 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Policy sufficiency.}
+To find collisions, we realized every abstract word up to length 3--4 through all concrete call sequences of the sandbox
+and labeled each realization with the independent checker.
+\begin{itemize}
+  \item With exact Boolean recognition, the expert alphabet produces no contradictory word in any domain (873 realizable
+  words).
+  \item With the hybrid recognizer used at runtime, LLM misreadings make 24.2\% (\dom{DocShare}) and 16.7\%
+  (\dom{DevOps}) of the realizable words contradictory: recognition errors break sufficiency (A1) just as a coarse
+  alphabet does.
+  \item A naive ``event = tool name'' alphabet has 19--63\% contradictory words.
+  \item Vocabularies derived by two LLMs (ablation~i) drop the distinctions that matter: file sensitivity, the payment
+  threshold and approval semantics, and destructiveness. They are contradictory on up to 69\% of words (\dom{DevOps}).
+  Contracts learned over them with an exact grounded oracle give 7--100\% false permissions.
+\end{itemize}
+
+\paragraph{Compilation.}
+All 142 DFA-based contracts produced in the evaluation agree with the DFA they were compiled from on every reachable
+transition (4{,}059 decision and state-update checks) and on all 1.37\,M words up to the length bound. Executed end to end
+on concrete calls, including alias tools, the reference and exact-$L^*$ contracts agree with their DFA on 100\% of
+decisions.
+
+One contract deviates: the noisy \system{} contract for \dom{DevOps}, at 89\%. The cause is semantic, not the
+compiler. Its DFA rejects one outcome of \texttt{run\_tests}, and the outcome is unknown before execution, so the
+pre-effect check must block the call.
+
+\paragraph{Instrumentation and timing.}
+Leaving one alias tool out of $\mu$ lowers trigger interception recall from 100\% to 18--94\%. Online, the agent then
+bypassed the contract through the unmapped tool in 2--3 of the 6 unsafe episodes per domain (33--50\% violations
+instead of 0\%). Used as a post-effect detector, the same contract flags violations but prevents none: 67--100\% of
+unsafe episodes violate. A monitor check takes 1.5--2.1\,$\mu$s with Boolean recognition.
+
+\answerbox{RQ3}{Compilation is faithful for all 142 contracts. The weak points lie at the boundary between the model and
+the agent:
+\begin{itemize}
+  \item recognizers must abstain rather than guess, and hybrid recognition eliminates the false permissions;
+  \item the alphabet must preserve the policy's distinctions, which the expert alphabet does and LLM-derived ones do
+  not, and recognition must not merge them, which the deployed hybrid recognizer does on 17--24\% of words in two
+  domains;
+  \item every tool that produces a relevant effect must be hooked;
+  \item enforcement must happen before the effect commits.
+\end{itemize}}
+
+% -------------------------------------------------------------------------------------
+\subsection{RQ4: Safety and Utility}
+\label{sec:rq4}
+
+Table~\ref{tab:rq4} compares all conditions.
+
+\paragraph{Baselines.}
+\begin{itemize}
+  \item Without a contract, the agent commits a violation in 21 of the 24 unsafe held-out tasks.
+  \item Contracts learned from exact labels and the careful expert rules are exact in all four domains. They prevent
+  every violation online while completing 22--23 of the 25 benign tasks. The two benign failures in \dom{DocShare} are
+  shared by all contracts: the hybrid recognizer classifies an unlabeled public file as confidential.
+  \item The naive expert rules miss approval consumption, the test-after-change requirement and the egress limit
+  (15--40\% UP), giving violations in 7 tasks.
+  \item Direct synthesis with reasoning is exact on \dom{DocShare} and \dom{DataExport}. It misses approval consumption
+  on \dom{Payments} (4.3\% UP), and its rules leave 28.5\% UP on \dom{DevOps}, which leads to 2 (DFA) and 4 (rules)
+  online violations. Without reasoning, the same model produces monitors with up to 100\% UP or 94\% OR.
+\end{itemize}
+
+\paragraph{\system{}.}
+With the non-reasoning judge, \system{} lets 3 violations through and completes 19 benign tasks. \systemR{} lets 1
+violation through and completes 22 benign tasks, the same utility as the exact contracts.
+
+\paragraph{Cost.}
+Exact $L^*$ needs 11--111 labels (27--311 with bounded equivalence testing). With an LLM judge, \system{} spent 29
+labels on \dom{DocShare} and its full 400-label budget elsewhere; \systemR{} was suspended after 266 labels on
+\dom{DataExport}. That is 45k--480k LLM tokens per contract without
+reasoning and 56k--972k with reasoning. Direct synthesis takes one call of 1.6k--8.1k tokens.
+
+
+\answerbox{RQ4}{Contracts learned with exact oracles prevent every violation, as the careful expert rules do, and
+complete 22 of 25 benign tasks (the careful rules complete 23), without any manually written rule. With practical LLM
+judges, \systemR{} lets 1 of 24 unsafe tasks through and completes 22 benign tasks. Online, this is on par with direct
+LLM synthesis (2--4 of 24) and random-query learning with the same judge (1 of 24): 24 tasks are too few to separate
+them, and at the language level direct DFA synthesis is more accurate than \systemR{} on \dom{DevOps} and
+\dom{DataExport}. All are well ahead of naive expert rules (7 of 24). \systemR{} costs up to about 1M tokens per
+contract.}
+
+% -------------------------------------------------------------------------------------
+\subsection{Threats to Validity}
+\label{sec:threats}
+
+\paragraph{Internal.}
+We wrote the domains, the reference DFAs, the concrete checkers, the expert abstraction and both expert rule sets. The
+careful rules are correct by construction; the naive rules are illustrative and do not estimate how often developers
+make such mistakes.
+
+\paragraph{External.}
+The four domains are small sandboxes ($|\Sigma|\le 6$, at most 6 states). All LLMs are local open-weight models rather
+than frontier models. No human experts took part: simulated label noise stands in for them. AgentSpec contracts run on a
+re-implemented runtime with AgentSpec's rule syntax and semantics.
+
+\paragraph{Construct.}
+Language-level rates weight all words up to the length bound equally, while online measures weight the behaviors the
+agent actually produces; we report both. With 49 held-out tasks, online rates are uncertain. LLM-labeled runs are capped at
+400 labels, so runs that do not converge are reported with their last hypothesis.

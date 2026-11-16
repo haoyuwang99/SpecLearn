@@ -1,0 +1,118 @@
+\section{Problem Formulation}\label{sec:problem}
+\paragraph{Inputs and output.}
+We are given three inputs: an instrumentable LLM agent $A$, including its tools, workflows, and execution environment; a labeled ground-truth dataset
+\[
+  \mathcal{D}=\{(z_1,y_1),\ldots,(z_n,y_n)\},\qquad y_i\in\{0,1\},
+\]
+of agent trajectories $z_i$ in $A$'s environment; and a natural-language safety policy $P$. The labels record how the world judges each trajectory, $y_i=g(z_i)$, where the \emph{ground-truth judgment} $g$ is given by human annotators or by checks of the environment's actual state, as in existing agent-safety benchmarks; $g(z)=1$ means that $z$ is acceptable. The trajectories may have been produced by $A$ or by other agents using the same tools. The policy is a \emph{summary of this experience}, such as an organization's written rules or a description of past incidents. It is not the specification: where the policy and the labels disagree, the labels win, and the policy matters for behavior that the dataset does not show. Our goal is to synthesize an independently enforceable AgentSpec contract $C$ with a \emph{trigger--check--enforce} interface~\cite{wang2026agentspec} that reproduces the ground-truth judgment. We study \emph{initial contract synthesis}, $(A,\mathcal{D},P)\mapsto C$; neither a previous agent nor a previous contract is an input. Contract evolution is outside the scope of this paper.
+
+\begin{definition}[Policy-relevant event abstraction]\label{def:event-abstraction}
+Let $\mathcal{Z}_A$ denote the set of finite concrete execution trajectories in $A$'s environment and tool interface. A trajectory $z=(o_1,\ldots,o_m)\in\mathcal{Z}_A$ consists of ordered observations, including proposed actions, tool outcomes, committed effects, and their relevant context. An \emph{event abstraction} is a 4-tuple
+\[
+  (\Sigma,\Phi,\alpha,\mu),
+\]
+where $\Sigma$ is a finite alphabet of policy-relevant events; $\Phi$ is a set of event-recognition predicates; $\alpha:\mathcal{Z}_A\rightarrow\Sigma^*$ maps a concrete trajectory to an ordered event word; and $\mu$ maps event classes to the agent's concrete observation and pre-effect interception points. Here $\Sigma^*$ denotes all finite words over $\Sigma$, including the empty word $\varepsilon$. The abstraction may omit policy-irrelevant observations but must preserve the order of emitted events.
+\end{definition}
+
+An event captures a policy-relevant \emph{effect and contextual distinction}, not merely the name of a tool. Each predicate in $\Phi$ has a natural-language meaning, like the policy, and an implementation that the framework does not restrict: a Boolean program over visible fields, a classifier using a pinned LLM with a fixed prompt and temperature zero, another learned model, or a combination such as a Boolean test with an LLM fallback when the test is inconclusive. Assumption (A4) below asks only that the implementation compute the intended abstraction. We keep the alphabet and event recognizers fixed within a learning run. This promotes repeatability, but does not guarantee that the predicates correctly capture every policy-relevant distinction.
+
+\begin{definition}[Permissible-behavior language and contract gap]\label{def:policy-language}
+Let $R=\{\alpha(z)\mid z\in\mathcal{Z}_A\}$ be the set of realizable abstract words. A \emph{permissible-behavior language} is a language $L_G\subseteq\Sigma^*$ that agrees with the ground truth on realizable behavior: $g(z)=1$ iff $\alpha(z)\in L_G$ for every $z\in\mathcal{Z}_A$. The ground truth fixes $L_G$ only on $R$; on unrealizable words, $L_G$ is the extension that the policy describes (Assumption (A3) below). For an AgentSpec contract $C$, let $L(C)\subseteq\Sigma^*$ denote the words accepted by its runtime monitor. The two forms of disagreement are
+\[
+ \underbrace{L(C)\setminus L_G}_{\text{unsafe permissions}}
+ \qquad
+ \underbrace{L_G\setminus L(C)}_{\text{over-restrictions}},
+\]
+where $\setminus$ denotes set difference.
+\end{definition}
+
+Our ideal synthesis objective concerns realizable behavior, which is all that enforcement meets:
+\[
+  L(C)\cap R=L_G\cap R .
+\]
+In practice, we require $C$ to agree with every labeled trajectory of $\mathcal{D}$, and we evaluate how well it generalizes on held-out labeled trajectories and on the agent's own executions.
+
+\paragraph{Assumptions.}
+Classical $L^*$ identifies a regular language exactly when a membership oracle and an equivalence oracle both answer exactly~\cite{angluin1987learning}. Our target is the ground-truth judgment, which can be observed only on the trajectories of $\mathcal{D}$. \system therefore answers each membership query from the labels when they determine the word, and otherwise asks an LLM that reads the policy $P$; it answers equivalence queries by replaying $\mathcal{D}$. We deliberately do not let an LLM judge equivalence: an LLM that could certify that a candidate automaton matches the ground truth could as well write the automaton itself. The analysis rests on five explicit assumptions:
+\begin{description}
+  \item[(A1)] \emph{Sufficient predicates.} The ground truth depends on a trajectory only through its word: a permissible-behavior language $L_G$ exists, so $g(z)=1\iff\alpha(z)\in L_G$ for every $z\in\mathcal{Z}_A$, including trajectories in which calls fail or are blocked. Trajectories mapped to the same word must receive the same judgment.
+  \item[(A2)] \emph{Finite-state target.} $L_G$ is regular over $\Sigma$ and \emph{prefix-closed},
+  \[
+   \forall u,v\in\Sigma^*:\quad uv\in L_G\ \Longrightarrow\ u\in L_G,
+  \]
+  so a prohibited prefix cannot become permitted by later events. We write $N$ for the number of states of its minimal deterministic finite automaton (DFA).
+  \item[(A3)] \emph{Policy-consistent membership off the dataset.} On every word that the labels do not determine, the LLM, reading $P$, answers according to $L_G$: $\operatorname{MQ}_{\mathrm{LLM}}(w)=1$ iff $w\in L_G$, consistently.
+  \item[(A4)] \emph{Faithful observation and interception.} At runtime, recognition computes $\alpha$, including the effect of a proposed call before it executes, and $\mu$ intercepts every consequential call before its effect commits.
+  \item[(A5)] \emph{Labels are the ground truth.} For every $(z,y)\in\mathcal{D}$, $y=g(z)$.
+\end{description}
+(A1) and (A4) concern the abstraction and the instrumentation, (A2) restricts the target, (A3) concerns the LLM, and (A5) the dataset. The policy enters only through (A3): it must let the LLM answer correctly where the data is silent, which is what makes it a useful summary of experience. A fixed alphabet alone implies neither regularity nor exact answers. Agent episodes have bounded length, and any language over a finite alphabet restricted to bounded-length words is regular, so the content of (A2) is that $N$ is small. (A2) covers ordering constraints, one-use permissions and bounded counts. It excludes unbounded totals, rates over time, relations among unboundedly many data values, and obligations that require an action to happen (Section~\ref{sec:limitations}).
+
+\paragraph{Learned monitor and compilation.}
+The learner produces a hypothesis DFA $\widehat M=(Q,\Sigma,\delta,q_0,F)$, where $Q$ is its finite state set, $\delta:Q\times\Sigma\rightarrow Q$ its transition function, $q_0\in Q$ its initial state, and $F\subseteq Q$ its accepting states. The compiler produces $C=\operatorname{Compile}(\widehat M,\alpha,\mu)$: the event mappings supply \emph{Trigger}, the DFA supplies \emph{Check}, and pre-effect mediation supplies \emph{Enforce}. We call compilation \emph{faithful} when $L(C)=L(\widehat M)$ over the modeled observation boundary. This is distinct from the correctness of the learned policy language and from concrete interception coverage.
+
+\paragraph{The two teachers.}
+The labels determine a word $w$ in two ways, by prefix closure: $w$ is a member if it is a prefix of the word of a compliant trajectory, and a non-member if it has the word of a violating trajectory as a prefix. A word determined both ways, and every extension of it, is a \emph{collision}: trajectories with the same word received different labels, which refutes (A1), and the LLM answers it instead. Writing $\lambda(w)$ for the label-determined answer and $\operatorname{dom}\lambda$ for the words the labels determine without collision, the membership teacher is
+\[
+  \operatorname{MQ}(w)=
+  \begin{cases}
+    \lambda(w), & w\in\operatorname{dom}\lambda,\\
+    \operatorname{MQ}_{\mathrm{LLM}}(w), & \text{otherwise}.
+  \end{cases}
+\]
+The equivalence check replays $\mathcal{D}$ through a hypothesis $\widehat M$ and returns the shortest word $\alpha(z)$ of a \emph{disagreement}, a labeled trajectory $(z,y)$ with $\widehat M(\alpha(z))\neq y$. Because the membership teacher answers such a word with its label, every disagreement outside a collision is a valid counterexample. A hypothesis with no disagreement is accepted. We call $\mathcal{D}$ \emph{complete} if every DFA $M$ with at most $N$ states and $L(M)\cap R\neq L_G\cap R$ disagrees with some labeled trajectory of $\mathcal{D}$.
+
+\begin{theorem}[Learning from a labeled dataset]\label{thm:exact}
+Run $L^*$ with the two teachers above.
+(a) Whatever the LLM answers, learning uses at most as many counterexamples as $\mathcal{D}$ has distinct words.
+(b) Under (A1)--(A3) and (A5), learning terminates after at most $N-1$ counterexamples and returns a DFA $\widehat M$ with at most $N$ states that agrees with every labeled trajectory of $\mathcal{D}$.
+(c) If, in addition, $\mathcal{D}$ is complete, then $L(\widehat M)\cap R=L_G\cap R$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+(a) $L^*$ adds every counterexample $w$ to its prefix set, and a hypothesis classifies each word of its prefix set by the table entry for that word, which is fixed once answered. The answer for $w$ is its label, so no later hypothesis disagrees with the trajectories whose word is $w$, and each distinct word is a counterexample at most once.
+(b) By (A5) and (A1), $y=1$ iff $\alpha(z)\in L_G$ for every $(z,y)\in\mathcal{D}$; with prefix closure (A2), the label-determined answers are correct, and no collision arises. By (A3), the LLM's answers are correct on the remaining words. The membership teacher is therefore exact for $L_G$, so prefixes with different rows are inequivalent, every hypothesis has at most $N$ states, and each counterexample adds at least one state~\cite{angluin1987learning}. The dataset is finite, so every check terminates, and learning ends with a hypothesis that has no disagreement.
+(c) That hypothesis has at most $N$ states and agrees with all of $\mathcal{D}$, so completeness gives $L(\widehat M)\cap R=L_G\cap R$.
+\end{proof}
+
+Theorem~\ref{thm:exact} is the classical $L^*$ argument with the minimally adequate teacher split in two: the labels of a dataset answer where they can, a policy-reading LLM answers elsewhere, and the dataset also simulates the equivalence oracle. Our contribution is this instantiation for agent safety, together with compilation into an enforced contract, not a new learning technique. Part (a) needs no assumption about the LLM: the number of equivalence rounds is bounded by the dataset even when the LLM is wrong, although the table can still grow when wrong answers make the LLM's language large (Section~\ref{sec:rq2}). Part (b) shows what the policy contributes: the labels fix the answers on the words they determine, and the policy fixes the rest, so the learned DFA explains every labeled trajectory and is never larger than the target's minimal DFA. Part (c) needs a complete dataset, which an existing dataset cannot be expected to be; we therefore measure generalization beyond $\mathcal{D}$ on held-out labeled trajectories (Section~\ref{sec:eval}). Learning uses at most $O(|\Sigma|(B+1)N^2)$ membership queries, where $B$ is the length of the longest word in the dataset, and only those that the labels do not determine reach the LLM.
+
+\begin{corollary}[Exact enforcement]\label{cor:enforce}
+Assume (A1)--(A5), let $\mathcal{D}$ be complete, and let $C=\operatorname{Compile}(\widehat M,\alpha,\mu)$ be faithfully compiled from the DFA returned in Theorem~\ref{thm:exact}. Then $C$ blocks a proposed call exactly when executing it would produce a trajectory that the ground truth rejects, and it blocks the call before its effect commits.
+\end{corollary}
+
+(A4) excludes calls whose effect is known only after they execute, such as a test run that may fail. For these the monitor blocks conservatively (Section~\ref{sec:compile}), which preserves safety but can block permitted behavior.
+
+\paragraph{When the assumptions fail.}
+The analysis is only as strong as (A1)--(A5), so \system treats each assumption as a claim to check rather than a belief. Collisions refute (A1) (Section~\ref{sec:abstraction}). An evolving agent can break (A1) even after a contract has been learned, by gaining tools or behaviors that the predicates do not distinguish; refining the predicates in response is outside the scope of this paper. Labels make the LLM's errors visible without letting them into the contract on the words they cover: on every word that the labels determine, \system also records the LLM's answer, and each disagreement shows where the policy fails to summarize the experience and how it should be revised. Off the dataset, a wrong LLM answer still enters the contract, and $L^*$ reproduces it exactly: in our controlled study, one wrong answer among 399 grew a four-state automaton to ten states (Section~\ref{sec:rq2}). A hypothesis that keeps growing therefore suggests that (A2) or (A3) fails. Label errors refute (A5), and with labels winning, they enter the contract unless they collide with other labels.
+
+\paragraph{Relation to classical $L^*$.}
+Table~\ref{tab:lstar} summarizes what changes. The observation table, the closure and consistency tests, and the counterexample loop are classical $L^*$; the target, the alphabet and both teachers are not.
+
+\begin{table}[t]
+  \caption{Classical $L^*$ and \system.}
+  \label{tab:lstar}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  % Cells start with \raggedright, so rows end with \tabularnewline (works without the array package).
+  \begin{tabular}{@{}p{1.45cm}p{2.5cm}p{3.8cm}@{}}
+    \toprule
+    & Classical $L^*$ & \system \tabularnewline
+    \midrule
+    Target & \raggedright regular language of a system or formal specification & \raggedright the ground-truth judgment
+    of agent behavior, $L_G$ on realizable words \tabularnewline
+    Alphabet & \raggedright given & \raggedright events defined by predicates over agent observations, of any
+    implementation (A1) \tabularnewline
+    Membership & \raggedright answered by the system or specification & \raggedright labels of the dataset where they
+    determine the word; otherwise an LLM reading the policy (A3) \tabularnewline
+    Equivalence & \raggedright exact oracle assumed & \raggedright replay of the labeled dataset (A5); never an LLM
+    \tabularnewline
+    Guarantee & \raggedright exact identification with polynomially many queries & \raggedright counterexamples bounded
+    by the dataset; a DFA consistent with the dataset after at most $N-1$ counterexamples; exact on realizable words if
+    the dataset is complete (Theorem~\ref{thm:exact}, Corollary~\ref{cor:enforce}) \tabularnewline
+    Output & \raggedright DFA & \raggedright DFA compiled into an AgentSpec contract that is enforced before effects
+    commit \tabularnewline
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The dataset, not $L^*$, is what grounds the result in the world: a DFA written directly by an LLM that agrees with a complete dataset satisfies the same conclusion. What $L^*$ adds is guaranteed progress, with each counterexample adding a state, and generalization through the policy, which answers the questions the data cannot. In our controlled study, a reasoning model wrote exactly correct DFAs for two of the four policies, with nothing to tell which two (Section~\ref{sec:rq4}); checking and repairing such DFAs against the same dataset is a baseline in our evaluation plan.
